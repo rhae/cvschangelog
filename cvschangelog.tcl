@@ -134,7 +134,7 @@ proc cvs::InsertTag { db File Checkin } {
 proc cvs::GetTagsByDate { db MapVar } {
   upvar $MapVar Map
 
-  $Db eval {
+  $db eval {
     SELECT date, tag 
       FROM tags T 
       WHERE date = (
@@ -143,7 +143,7 @@ proc cvs::GetTagsByDate { db MapVar } {
         WHERE date = T.date AND tag = T.tag
       )
       GROUP BY tag
-      ORDER BY date DESC;
+      ORDER BY date ASC;
   } {
     set Map($date) $tag
   }
@@ -431,7 +431,7 @@ proc cvs::CheckinList { fd Db } {
 
   array set DateTagMap [list]
   GetTagsByDate $Db DateTagMap
-  parray DateTagMap
+  #parray DateTagMap
 
   set LastCommit ""
   set Files [list]
@@ -561,6 +561,34 @@ proc cvs::CheckinList { fd Db } {
   }
 }
 
+proc cvs::Tags { Db } {
+  array set DateTagMap [list]
+  GetTagsByDate $Db DateTagMap
+  
+  append Html {
+      <div class="w3-container w3-content">
+        <div class="w3-panel w3-x-blue-st">
+          <p>Tags</p>
+        </div>
+
+        <table class="w3-table-narrow-all w3-tiny">
+        <col width="200px">
+        <col>
+        <tr class="w3-dark-grey">
+          <th>Tag</th>
+          <th>Datum</th>
+        </tr>
+  }
+  parray DateTagMap
+  puts [array get DateTagMap]
+  foreach {FullDate Tag} [lsort -stride 2 -index 0 -decreasing [array get DateTagMap]] {
+    lassign [split $FullDate " "] Date
+    append Html [format {<tr><td>%s</td><td>%s</td></tr>} $Tag $Date]
+  }
+  append Html {</table>
+    </div>}
+}
+
 proc cvs::changelog { Repo commentfilter } {
 
   set Ret [rlog2sql $Repo $commentfilter]
@@ -601,6 +629,7 @@ proc cvs::changelog { Repo commentfilter } {
   puts $Html <body>
   puts $Html [RepoInfo $Db]
   puts $Html [CodeSize $Db]
+  puts $Html [Tags $Db]
   #puts $Html [CheckinByDeveloper $Db]
   CheckinList $Html $Db
   puts $Html {<div class="w3-container w3-content"><br></div>}
