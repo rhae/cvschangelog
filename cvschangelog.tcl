@@ -452,13 +452,11 @@ proc cvs::CheckinList { fd Db } {
         set Tag [format {<div class="w3-tag w3-black">%s</div>} $DateTagMap($FullDate)]
       }
 
-      set CheckIn [format {
-        <tr>
+      set CheckIn [format {<tr>
           <td>%s</td>
           <td>%s</td>
           <td>%s</td>
-          <td>
-      } $date $author $Tag]
+          <td>} $date $author $Tag]
       set LastDate [lindex [split $date] 0]
       set LastComment $comment
       set LastCommit $commitid
@@ -472,13 +470,12 @@ proc cvs::CheckinList { fd Db } {
 
       foreach Item [lsort -index 0 $Files] {
         lassign $Item File Version Changed
-        append CheckIn $File " " $Version " " $Changed "<br>"
+        append CheckIn "\n" $File " " $Version " " $Changed "<br>"
       }
       append CheckIn [format {
           </td>
           <td>%s</td>
-        </tr>
-      } $LastComment]
+        </tr>} $LastComment]
       puts $fd $CheckIn
 
       if { $date eq $LastDate } {
@@ -490,13 +487,11 @@ proc cvs::CheckinList { fd Db } {
       if { $FullDate in [array names DateTagMap] } {
         set Tag [format {<div class="w3-tag w3-black">%s</div>} $DateTagMap($FullDate)]
       }
-      set CheckIn [format {
-        <tr>
+      set CheckIn [format {        <tr>
           <td>%s</td>
           <td>%s</td>
           <td>%s</td>
-          <td>
-      } $date $author $Tag]
+          <td>} $date $author $Tag]
 
       set LastComment $comment
       set LastCommit $commitid
@@ -510,13 +505,12 @@ proc cvs::CheckinList { fd Db } {
 
   foreach Item [lsort -index 0 $Files] {
     lassign $Item File Version Changed
-    append CheckIn $File " " $Version " " $Changed "<br>"
+    append CheckIn "\n" $File " " $Version " " $Changed "<br>"
   }
   append CheckIn [format {
       </td>
       <td>%s</td>
-    </tr>
-  } $LastComment]
+    </tr>} $LastComment]
   puts $fd $CheckIn
 
   puts $fd {
@@ -579,11 +573,10 @@ proc cvs::Tags { Db } {
           <th>Datum</th>
         </tr>
   }
-  parray DateTagMap
-  puts [array get DateTagMap]
+  
   foreach {FullDate Tag} [lsort -stride 2 -index 0 -decreasing [array get DateTagMap]] {
     lassign [split $FullDate " "] Date
-    append Html [format {<tr><td>%s</td><td>%s</td></tr>} $Tag $Date]
+    append Html [format {<tr><td>%s</td><td>%s</td></tr>} $Tag $Date] "\n"
   }
   append Html {</table>
     </div>}
