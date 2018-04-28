@@ -5,6 +5,10 @@ package require sqlite3
 
 source libs/gp.tcl
 
+proc GetVersion {} {
+  return "0.1"
+}
+
 proc _ReadEnv { Var Default } {
   if { $Var ni [array names ::env] } {
     return $Default
@@ -149,6 +153,38 @@ proc cvs::GetTagsByDate { db MapVar } {
   }
 }
 
+#
+# \return list of files in this repository
+proc cvs::GetTotalFiles { db } {
+  return [$db eval {
+    SELECT DISTINCT COUNT(DISTINCT file) FROM commits;
+  }]
+}
+
+#
+# returns list of authors sorted by author
+proc cvs::GetAuthors { db } {
+  return [$db eval {
+    SELECT DISTINCT author FROM commits ORDER BY author ASC;
+  }]
+}
+
+#
+# \return list with autor and number of modified files
+proc cvs::GetFileCntModified { db } {
+  return [$db eval {
+    SELECT author, COUNT(*) FROM commits GROUP BY author;
+  }]
+}
+
+#
+# \return list with author and last commit date
+proc cvs::GetLastCommit { db } {
+  return [$db eval {
+    SELECT author, MAX(date) FROM commits GROUP BY author;
+  }]
+}
+
 proc cvs::rlog2sql { Repo commentfilter } {
   variable Data
 
@@ -225,14 +261,18 @@ proc cvs::rlog2sql { Repo commentfilter } {
             }
             "date:*" {
               foreach Item [split $Line ";"] {
-                set key [string range $Item 0 [string first ":" $Item]-1]
+                set key   [string trim [string range $Item 0 [string first ":" $Item]-1]]
+                set value [string trim [string range $Item [string first ":" $Item]+1 end]]
                 switch $key {
                   "date" {
-                    set Date [clock scan [string range $Item [string first ":" $Item]+1 end] -format {%Y/%m/%d %H:%M:%S}]
+                    set Date [clock scan $value -format {%Y/%m/%d %H:%M:%S}]
                     set value [clock format $Date -format {%Y-%m-%d %H:%M:%S}]
                   }
-                  default {
-                    set value [string range $Item [string first ":" $Item]+1 end]
+                  "author" {
+                    if { [string index $value 0] eq "\\" } {
+                      set value [string range $value 1 end]
+                    }
+                    set value [string totitle $value]
                   }
                 }
                 if { $key ne "" } {
@@ -374,6 +414,44 @@ proc cvs::CodeSize { Db } {
       </div>
     </div>
   }
+}
+
+proc cvs::ActivityByDev { Db } {
+  append Html {<div class="w3-container w3-content">
+      <div class="w3-panel w3-x-blue-st">
+        <p>Entwickler-Aktivität</p>
+      </div>
+      <table class="w3-table-narrow-all w3-tiny">
+      <colgroup>
+        <col style="width:10%">
+        <col style="width:10%">
+        <col style="width:15%;padding-right: 16px">
+        <col style="width:65%">
+      </colgroup>
+      }
+  append Html [format {
+    <tr class="w3-dark-grey">
+      <th>%s</th>
+      <th>%s</th>
+      <th>%s</th>
+      <th></th>
+    </tr>
+  } "Entwickler" "Änderungen" "Letzte Änderung"]
+
+  array set Modified [cvs::GetFileCntModified $Db]
+  array set LastCommit [cvs::GetLastCommit $Db]
+  foreach Author [cvs::GetAuthors $Db] {
+    append Html [format {
+      <tr>
+        <td>%s</td>
+        <td class="w3-right-align">%s<span style="padding-right:32px"> </span></td>
+        <td>%s</td>
+        <td></td>
+      </tr>
+    } $Author $Modified($Author) $LastCommit($Author)]
+  }
+
+  append Html {</table></div>}
 }
 
 proc cvs::CheckinByDeveloper { Db } {
@@ -622,6 +700,7 @@ proc cvs::changelog { Repo commentfilter } {
   puts $Html <body>
   puts $Html [RepoInfo $Db]
   puts $Html [CodeSize $Db]
+  puts $Html [ActivityByDev $Db]
   puts $Html [Tags $Db]
   #puts $Html [CheckinByDeveloper $Db]
   CheckinList $Html $Db
