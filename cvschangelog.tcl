@@ -170,11 +170,39 @@ proc cvs::GetAuthors { db } {
 }
 
 #
+# \param db     handle to database
+# \param type   all or distinct file
+#
 # \return list with autor and number of modified files
-proc cvs::GetFileCntModified { db } {
-  return [$db eval {
-    SELECT author, COUNT(*) FROM commits GROUP BY author;
-  }]
+proc cvs::GetFileCntModified { db type } {
+
+  if { $type eq "all" } {
+    return [$db eval {
+      SELECT author, COUNT(*) FROM commits GROUP BY author;
+    }]
+  }
+
+  set Result [list]
+  set Cnt 1
+  set LastAuthor ""
+  $db eval {
+      SELECT DISTINCT author, file FROM commits ORDER BY author;
+  } {
+    if { $author eq $LastAuthor } {
+      #set LastAuthor $author
+      incr Cnt
+    } elseif { $author ne $LastAuthor } {
+      if { $LastAuthor ne "" } {
+        lappend Result $LastAuthor $Cnt
+      }
+      set Cnt 1
+      set LastAuthor $author
+    }
+  }
+  lappend Result $LastAuthor $Cnt
+  puts $Result
+
+  return $Result
 }
 
 #
@@ -434,21 +462,22 @@ proc cvs::ActivityByDev { Db } {
       <th>%s</th>
       <th>%s</th>
       <th>%s</th>
-      <th></th>
+      <th>%s</th>
     </tr>
-  } "Entwickler" "Änderungen" "Letzte Änderung"]
+  } "Entwickler" "Änderungen (alle)" "Änderungen (unterschiedliche Dateien)" "Letzte Änderung"]
 
-  array set Modified [cvs::GetFileCntModified $Db]
+  array set ModifiedAll [cvs::GetFileCntModified $Db "all"]
+  array set ModifiedDistinct [cvs::GetFileCntModified $Db "distinct"]
   array set LastCommit [cvs::GetLastCommit $Db]
   foreach Author [cvs::GetAuthors $Db] {
     append Html [format {
       <tr>
         <td>%s</td>
         <td class="w3-right-align">%s<span style="padding-right:32px"> </span></td>
+        <td class="w3-right-align">%s<span style="padding-right:32px"> </span></td>
         <td>%s</td>
-        <td></td>
       </tr>
-    } $Author $Modified($Author) $LastCommit($Author)]
+    } $Author $ModifiedAll($Author) $ModifiedDistinct($Author) $LastCommit($Author)]
   }
 
   append Html {</table></div>}
