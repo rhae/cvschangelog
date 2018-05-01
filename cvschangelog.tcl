@@ -499,8 +499,9 @@ proc cvs::ActivityByDev { Db } {
       <colgroup>
         <col style="width:10%">
         <col style="width:10%">
+        <col style="width:10%">
         <col style="width:15%;padding-right: 16px">
-        <col style="width:65%">
+        <col style="width:55%">
       </colgroup>
       }
   append Html [format {
@@ -509,21 +510,30 @@ proc cvs::ActivityByDev { Db } {
       <th>%s</th>
       <th>%s</th>
       <th>%s</th>
+      <th>%s</th>
     </tr>
-  } "Entwickler" "Änderungen (alle)" "Änderungen (unterschiedliche Dateien)" "Letzte Änderung"]
+  } "Entwickler" "Änderungen absolut (alle)" "Änderungen prozentual (alle)" "Änderungen (unterschiedliche Dateien)" "Letzte Änderung"]
 
   array set ModifiedAll [cvs::GetFileCntModified $Db "all"]
   array set ModifiedDistinct [cvs::GetFileCntModified $Db "distinct"]
   array set LastCommit [cvs::GetLastCommit $Db]
+
+  set TotalCommits 0
   foreach Author [cvs::GetAuthors $Db] {
+    incr TotalCommits $ModifiedAll($Author)
+  }
+
+  foreach Author [cvs::GetAuthors $Db] {
+    set Percentage [expr $ModifiedAll($Author).0 / $TotalCommits * 100]
     append Html [format {
       <tr>
         <td>%s</td>
         <td class="w3-right-align">%s<span style="padding-right:32px"> </span></td>
+        <td class="w3-right-align">%2.1f %%<span style="padding-right:32px"> </span></td>
         <td class="w3-right-align">%s<span style="padding-right:32px"> </span></td>
         <td>%s</td>
       </tr>
-    } $Author $ModifiedAll($Author) $ModifiedDistinct($Author) $LastCommit($Author)]
+    } $Author $ModifiedAll($Author) $Percentage $ModifiedDistinct($Author) $LastCommit($Author)]
   }
 
   append Html {</table></div>}
