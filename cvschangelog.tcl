@@ -234,6 +234,31 @@ proc cvs::GetCommitsByWeekday { db } {
   return $Result
 }
 
+#
+#
+# \return list with hour and sum of commits on that day
+proc cvs::GetCommitsByHour { db } {
+  set Result [list]
+  $db eval {
+    SELECT hour, COUNT(hour) AS cnt
+      FROM (
+        SELECT strftime( '%H', date ) AS hour
+        FROM commits
+        ORDER BY hour
+      )
+      GROUP BY hour;
+  } {
+    lappend Result $hour $cnt
+  }
+  return $Result
+}
+
+#
+# import changes of CVS repository to SQLite db
+#
+# \param Repo           CVS Repository/module
+# \param commentfilter  function name to filter texts from a commit comment
+#
 proc cvs::rlog2sql { Repo commentfilter } {
   variable Data
 
