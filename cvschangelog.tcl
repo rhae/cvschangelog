@@ -213,6 +213,27 @@ proc cvs::GetLastCommit { db } {
   }]
 }
 
+#
+#
+# \return list with weekday and sum of commits on that day
+proc cvs::GetCommitsByWeekday { db } {
+  set Weekdays [list So Mo Di Mi Do Fr Sa]
+  set Result [list]
+  $db eval {
+    SELECT wday, COUNT(wday) AS cnt
+      FROM (
+        SELECT strftime( '%w', date ) AS wday
+        FROM commits 
+        ORDER BY wday
+      )
+      GROUP BY wday;
+  } {
+    set Weekday [lindex $Weekdays $wday]
+    lappend Result $Weekday $cnt
+  }
+  return $Result
+}
+
 proc cvs::rlog2sql { Repo commentfilter } {
   variable Data
 
