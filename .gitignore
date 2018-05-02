@@ -1,0 +1,7 @@
+temp/**
+old/**
+sqlite3/**
+*.html
+*.rlog
+*.bak
+*.tmp
