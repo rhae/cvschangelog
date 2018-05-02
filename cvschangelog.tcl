@@ -2,6 +2,7 @@
 
 lappend auto_path sqlite3
 package require sqlite3
+package require platform
 
 source libs/gp.tcl
 
@@ -24,14 +25,17 @@ namespace eval cvs {
   set Data(CVS) [_ReadEnv CVS cvs]
   set Data(CVSROOT) [_ReadEnv CVSROOT ""]
   set Data(EDITOR) [_ReadEnv EDITOR vi]
+  set Data(TEMP) [_ReadEnv TEMP ""]
 }
 
 proc cvs::rlog { Repo File } {
   variable Data
 
-  file copy -force cvschangelogbuilder.2204609-A.10092.tmp $File
-  puts "copy cvschanlogbuilder... $File"
-  return 0
+  if { [string match linux* [platform::identify]] } {
+    file copy -force cvschangelogbuilder.2204609-A.10092.tmp $File
+    puts "copy cvschanlogbuilder... $File"
+    return 0
+  }
 
 
   if { $Data(CVSROOT) eq "" } {
@@ -40,14 +44,19 @@ proc cvs::rlog { Repo File } {
   }
 
   try {
-    exec $Data(CVS) rlog $Repo > $File
+    exec $Data(CVS) -d $Data(CVSROOT) rlog $Repo > $File
   } trap CHILDSTATUS {results options } {
     puts "ERROR: $results"
   } on error {results options } {
-
   }
 
   return 0
+  }
+
+proc cvs::GetDbFile { Repo } {
+  variable Data
+
+  return [file join $Data(TEMP) ${Repo}.sqlite3]
 }
 
 proc cvs::InitDB { db } {
@@ -114,7 +123,7 @@ proc cvs::InsertTag { db File Checkin } {
   set revision [dict get $Checkin revision]
 
   if { $tag eq "" } {
-    puts "No Tag for: $File $revision $date"
+    # puts "No Tag for: $File $revision $date"
     return;
   }
 
@@ -263,7 +272,7 @@ proc cvs::rlog2sql { Repo commentfilter } {
   variable Data
 
   puts [info level 0]
-  set RlogFile [file join /tmp ${Repo}.rlog]
+  set RlogFile [file join $Data(TEMP) ${Repo}.rlog]
   set Ret [rlog $Repo $RlogFile]
   if { $Ret < 0 } {
     return $Ret
@@ -271,7 +280,9 @@ proc cvs::rlog2sql { Repo commentfilter } {
 
   set fd [open $RlogFile]
   set db cvsdb
-  sqlite3 cvsdb /tmp/2204609.sqlite3
+  set Filename [GetDbFile $Repo]
+  puts "Create SQLite3 db: '$Filename'"
+  sqlite3 cvsdb $Filename
 
   InitDB $db
 
@@ -279,14 +290,21 @@ proc cvs::rlog2sql { Repo commentfilter } {
   set History [dict create]
   set CVSTags [list]
   set RCSfile ""
-  set CVSROOT_len [string length $Data(CVSROOT)]
+  set Base [lindex [split $Data(CVSROOT) ":"] end]
+  append Base "/" $Repo "/"
+  set BaseLen [string length $Base]
+  set Encoding [encoding system]
+
   while {[gets $fd Line] >= 0} {
     incr LineNo
     switch -glob $Line {
       "RCS file:*" {
-        set RCSfile [string range $Line 11+$CVSROOT_len end-2]
+        set RCSfile [string range $Line 10+$BaseLen end-2]
         dict set History file $RCSfile
-        # puts "== $RCSfile"
+
+        #  puts "== $Line"
+        #  puts "   $RCSfile"
+
       }
       "head:*" -
       "branch:*" -
@@ -364,7 +382,7 @@ proc cvs::rlog2sql { Repo commentfilter } {
             }
             "branches:*" {
             }
-            "------------*" -
+            "----------------------------" -
             "============*" {
               if { $commentfilter ne "" } {
                 try {
@@ -375,9 +393,17 @@ proc cvs::rlog2sql { Repo commentfilter } {
                   exit 1
                 }
               }
-              dict set Checkin comment [string trim $comment " \r\n\t"]
-              InsertCommit $db $RCSfile $Checkin
-              InsertTag    $db $RCSfile $Checkin
+              dict set Checkin comment [encoding convertto utf-8 [string trim $comment " \r\n\t"]]
+              try {
+                  InsertCommit $db $RCSfile $Checkin
+                  InsertTag    $db $RCSfile $Checkin
+              } on error { result options } {
+                  puts [format {Line %5d, %s%s  %s} $LineNo $RCSfile "\n" $result]
+                  foreach k [dict keys $Checkin] {
+                      puts [format {%15s = %s} $k [dict get $Checkin $k]]
+                  }
+                  exit 1
+              }
               set Comment ""
               set Checkin [dict create]
 
@@ -443,34 +469,31 @@ proc cvs::ChartCodeSize { Db } {
   
 }
 
-proc cvs::RepoInfo { Db } {
+proc cvs::RepoInfo { Db Repo Branch } {
+  variable Data
 
-  return {
+  set Html {
     <div class="w3-container w3-content">
         <div class="w3-panel w3-x-blue-st">
           <p>CVS-Repository</p>
         </div>
   
         <table class="w3-table-all w3-small">
-            <tr>
-                <td>Erstellt</td>
-                <td>2018-21-04 12:25</td>
-            </tr>
-            <tr>
-              <td>Repository</td>
-              <td>2204609</td>
-            </tr>
-            <tr>
-                <td>CVSROOT</td>
-                <td>ext:hsdghjg</td>
-            </tr>
-            <tr>
-                <td>Branch</td>
-                <td>HEAD</td>
-            </tr>
-        </table>
-      </div>
   }
+
+  # TODO RLOGfile
+  set Infos [list \
+    "Erstellt am"   [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"] \
+    CVSROOT         $Data(CVSROOT) \
+    Repository      $Repo \
+    Branch          $Branch \
+  ]
+
+  foreach { Title Value } $Infos {
+    append Html "<tr><td>$Title</td><td>$Value</td></tr>"
+  }
+  append Html "</table>\n</div>"
+  return $Html
 }
 
 proc cvs::CodeSize { Db } {
@@ -554,9 +577,7 @@ proc cvs::CheckinByDeveloper { Db } {
   }
   close $fd
 
-  
-
-  return {
+ return {
     <div class="w3-container w3-content">
       <div class="w3-panel w3-x-blue-st">
         <p>Checkin nach Entwickler</p>
@@ -612,7 +633,7 @@ proc cvs::CheckinList { fd Db } {
     if { $LastCommit eq "" } {
       set Tag ""
       if { $FullDate in [array names DateTagMap] } {
-        set Tag [format {<div class="w3-tag w3-black">%s</div>} $DateTagMap($FullDate)]
+        set Tag [format {<div class="w3-x-tag w3-black">%s</div>} $DateTagMap($FullDate)]
       }
 
       set CheckIn [format {<tr>
@@ -641,20 +662,22 @@ proc cvs::CheckinList { fd Db } {
         </tr>} $LastComment]
       puts $fd $CheckIn
 
+      #set DateHtml [format {<span class="w3-text-blue">%s</span>} $date]
+      set DateHtml $date
       if { $date eq $LastDate } {
-        set date ""
+        set DateHtml [format {<span class="w3-x-grey-st">%s</span>} $date]
       }
       set LastDate $date
 
       set Tag ""
       if { $FullDate in [array names DateTagMap] } {
-        set Tag [format {<div class="w3-tag w3-black">%s</div>} $DateTagMap($FullDate)]
+        set Tag [format {<div class="w3-x-tag w3-black">%s</div>} $DateTagMap($FullDate)]
       }
       set CheckIn [format {        <tr>
           <td>%s</td>
           <td>%s</td>
           <td>%s</td>
-          <td>} $date $author $Tag]
+          <td>} $DateHtml $author $Tag]
 
       set LastComment $comment
       set LastCommit $commitid
@@ -662,8 +685,7 @@ proc cvs::CheckinList { fd Db } {
       set Files [list]
     }
 
-    set f [string range $file 14 end]
-    lappend Files [list $f $revision $lines]
+    lappend Files [list $file $revision $lines]
   }
 
   foreach Item [lsort -index 0 $Files] {
@@ -679,46 +701,10 @@ proc cvs::CheckinList { fd Db } {
   puts $fd {
     </table>
   </div>}
-  return
 
-  puts $fd {
-      <div class="w3-container w3-content">
-        <div class="w3-panel w3-x-blue-st">
-          <p>Checkins</p>
-        </div>
-
-        <table class="w3-table-narrow-all w3-tiny">
-          <col style="width:12%">
-          <col style="width:8%">
-          <col style="width:15%">
-          <col style="width:20%">
-          <col style="width:45%">
-
-          <tr class="w3-dark-grey">
-            <th>Datum</th>
-            <th>Autor</th>
-            <th>Tag</th>
-            <th>Dateien</th>
-            <th>Kommentar</th>
-          </tr>
-          <tr>
-            <td>21.04.2018 06:18</td>
-            <td>hae</td>
-            <td><div class="w3-tag w3-red">T110-40-201_RC01</div></td>
-            <td>
-              README 1.2, +3 -0<br>
-              src/main.c 1.2, +144 -12<br>
-            </td>
-            <td>
-              Merge A11111_Feature_01
-            </td>
-          </tr>
-        </table>
-      </div>
-  }
 }
 
-proc cvs::Tags { Db } {
+proc cvs::Tags { Db {MaxTags 20} } {
   array set DateTagMap [list]
   GetTagsByDate $Db DateTagMap
   
@@ -737,7 +723,12 @@ proc cvs::Tags { Db } {
         </tr>
   }
   
+  set TagCnt 0
   foreach {FullDate Tag} [lsort -stride 2 -index 0 -decreasing [array get DateTagMap]] {
+    incr TagCnt
+    if { $TagCnt > $MaxTags } {
+      break;
+    }
     lassign [split $FullDate " "] Date
     append Html [format {<tr><td>%s</td><td>%s</td></tr>} $Tag $Date] "\n"
   }
@@ -745,7 +736,8 @@ proc cvs::Tags { Db } {
     </div>}
 }
 
-proc cvs::changelog { Repo commentfilter } {
+proc cvs::changelog { Repo Branch commentfilter } {
+  variable Data
 
   set Ret [rlog2sql $Repo $commentfilter]
   if { $Ret < 0 } {
@@ -753,11 +745,13 @@ proc cvs::changelog { Repo commentfilter } {
   }
 
   set Db cvsdb
-  sqlite3 $Db /tmp/2204609.sqlite3
+  sqlite3 $Db [GetDbFile $Repo]
 
   set Css [ReadFile w3c.css]
   append Css {.w3-x-img-center{display:block;margin-left: auto; margin-right:auto}} "\n"
   append Css {.w3-x-blue-st{color:#fff!important;background-color: #009ce2}} "\n"
+  append Css {.w3-x-grey-st{color:#adadad!important}} "\n"
+  append Css {.w3-x-tag{background-color:#000;color:#fff;display:inline-block;padding-left:4px;padding-right:4px;text-align:center;font-size:6pt}} "\n"
 
   append Css {
     .w3-table-narrow,.w3-table-narrow-all{border-collapse:collapse;border-spacing:0;width:100%;display:table}.w3-table-narrow-all{border:1px solid #ccc}
@@ -783,7 +777,7 @@ proc cvs::changelog { Repo commentfilter } {
 
   puts $Html $Header
   puts $Html <body>
-  puts $Html [RepoInfo $Db]
+  puts $Html [RepoInfo $Db $Repo $Branch]
   puts $Html [CodeSize $Db]
   puts $Html [ActivityByDev $Db]
   puts $Html [Tags $Db]
@@ -836,8 +830,8 @@ proc main { argv } {
   set ArgMax [llength $argv]
   array set Args [list]
   set Args(module) ""
-  set Args(branch) ""
-  set Args(cvsroot) ""
+  set Args(branch) "HEAD"
+  set Args(cvsroot) $::cvs::Data(CVSROOT)
   set Args(ignore) ""
   set Args(commentfilter) ""
 
@@ -847,19 +841,24 @@ proc main { argv } {
     incr ArgIdx
     if { [string match "-m=*" $Argument] || [string match "-module=*" $Argument] } {
       set Args(module) [lindex [split $Argument "="] 1]
-    } else if { [string match "-branch=*" $Argument] } {
+    } elseif { [string match "-branch=*" $Argument] } {
       set Args(branch) [lindex [split $Argument "="] 1]
+    } elseif { [string match "-d" $Argument] } {
+      set Args(cvsroot) [lindex $argv $ArgIdx]
     }
   }
-  parray Args
+  set cvs::Data(CVSROOT) $Args(cvsroot)
 
-  catch {
-    file delete -force /tmp/2204609.sqlite3
+  #parray Args
+  #parray cvs::Data
+
+  try {
+    file delete -force [cvs::GetDbFile $Args(module)]
+  } on error {results options } {
+    puts "ERROR file delete $results"
   }
 
-  set Repo 2204609
-
-  cvs::changelog $Repo commentfilter
+  cvs::changelog $Args(module) $Args(branch) commentfilter
 }
 
 #puts $argv0
