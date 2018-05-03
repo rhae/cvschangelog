@@ -1,439 +1,26 @@
 #!/bin/tclsh
 
-lappend auto_path sqlite3
-package require sqlite3
 package require platform
 
 source libs/gp.tcl
+source libs/cvs.tcl
 
 proc GetVersion {} {
   return "0.1"
 }
 
-proc _ReadEnv { Var Default } {
-  if { $Var ni [array names ::env] } {
-    return $Default
-  }
-  return $::env($Var)
+namespace eval cvscl {
+
 }
 
-namespace eval cvs {
-
-  variable Data
-  
-
-  set Data(CVS) [_ReadEnv CVS cvs]
-  set Data(CVSROOT) [_ReadEnv CVSROOT ""]
-  set Data(EDITOR) [_ReadEnv EDITOR vi]
-  set Data(TEMP) [_ReadEnv TEMP ""]
-}
-
-proc cvs::rlog { Repo File } {
-  variable Data
-
-  if { [string match linux* [platform::identify]] } {
-    file copy -force cvschangelogbuilder.2204609-A.10092.tmp $File
-    puts "copy cvschanlogbuilder... $File"
-    return 0
-  }
-
-
-  if { $Data(CVSROOT) eq "" } {
-    puts "No CVSROOT specified! Please use the '-d' option"
-    return -1
-  }
-
-  try {
-    exec $Data(CVS) -d $Data(CVSROOT) rlog $Repo > $File
-  } trap CHILDSTATUS {results options } {
-    puts "ERROR: $results"
-  } on error {results options } {
-  }
-
-  return 0
-  }
-
-proc cvs::GetDbFile { Repo } {
-  variable Data
-
-  return [file join $Data(TEMP) ${Repo}.sqlite3]
-}
-
-proc cvs::InitDB { db } {
-  $db eval {
-    CREATE TABLE commits (
-      commitid text,
-      author text,
-      date text,
-      file text,
-      revision text,
-      branches text,
-      lines text,
-      comment text
-    );
-
-    CREATE TABLE tags (
-      commitid text,
-      tag text,
-      date text,
-      file text,
-      revision text
-    );
-  }
-}
-
-proc cvs::InsertCommit { db File Checkin } {
-
-  # puts [info level 0]
-
-  set commitid [dict get $Checkin commitid]
-  set author [dict get $Checkin author]
-  set date [dict get $Checkin date]
-  set revision [dict get $Checkin revision]
-  set lines [dict get $Checkin lines]
-  set comment [dict get $Checkin comment]
-
-  $db eval {
-    INSERT INTO commits(
-      file,
-      commitid,
-      author,
-      date,
-      revision,
-      lines,
-      comment
-    ) VALUES (
-      $File,
-      $commitid,
-      $author,
-      $date,
-      $revision,
-      $lines,
-      $comment
-    );
-  }
-}
-
-proc cvs::InsertTag { db File Checkin } {
-
-  set commitid [dict get $Checkin commitid]
-  set author [dict get $Checkin author]
-  set tag [dict get $Checkin tag]
-  set date [dict get $Checkin date]
-  set revision [dict get $Checkin revision]
-
-  if { $tag eq "" } {
-    # puts "No Tag for: $File $revision $date"
-    return;
-  }
-
-  $db eval {
-    INSERT INTO tags(
-      commitid,
-      tag,
-      date,
-      file,
-      revision
-    ) VALUES (
-      $commitid,
-      $tag,
-      $date,
-      $File,
-      $revision
-    );
-  }
-}
-
-proc cvs::GetTagsByDate { db MapVar } {
-  upvar $MapVar Map
-
-  $db eval {
-    SELECT date, tag 
-      FROM tags T 
-      WHERE date = (
-        SELECT MAX(date) 
-        FROM tags 
-        WHERE date = T.date AND tag = T.tag
-      )
-      GROUP BY tag
-      ORDER BY date ASC;
-  } {
-    set Map($date) $tag
-  }
-}
-
-#
-# \return list of files in this repository
-proc cvs::GetTotalFiles { db } {
-  return [$db eval {
-    SELECT DISTINCT COUNT(DISTINCT file) FROM commits;
-  }]
-}
-
-#
-# returns list of authors sorted by author
-proc cvs::GetAuthors { db } {
-  return [$db eval {
-    SELECT DISTINCT author FROM commits ORDER BY author ASC;
-  }]
-}
-
-#
-# \param db     handle to database
-# \param type   all or distinct file
-#
-# \return list with autor and number of modified files
-proc cvs::GetFileCntModified { db type } {
-
-  if { $type eq "all" } {
-    return [$db eval {
-      SELECT author, COUNT(*) FROM commits GROUP BY author;
-    }]
-  }
-
-  set Result [list]
-  set Cnt 1
-  set LastAuthor ""
-  $db eval {
-      SELECT DISTINCT author, file FROM commits ORDER BY author;
-  } {
-    if { $author eq $LastAuthor } {
-      #set LastAuthor $author
-      incr Cnt
-    } elseif { $author ne $LastAuthor } {
-      if { $LastAuthor ne "" } {
-        lappend Result $LastAuthor $Cnt
-      }
-      set Cnt 1
-      set LastAuthor $author
-    }
-  }
-  lappend Result $LastAuthor $Cnt
-  puts $Result
-
-  return $Result
-}
-
-#
-# \return list with author and last commit date
-proc cvs::GetLastCommit { db } {
-  return [$db eval {
-    SELECT author, MAX(date) FROM commits GROUP BY author;
-  }]
-}
-
-#
-#
-# \return list with weekday and sum of commits on that day
-proc cvs::GetCommitsByWeekday { db } {
-  set Weekdays [list So Mo Di Mi Do Fr Sa]
-  set Result [list]
-  $db eval {
-    SELECT wday, COUNT(wday) AS cnt
-      FROM (
-        SELECT strftime( '%w', date ) AS wday
-        FROM commits 
-        ORDER BY wday
-      )
-      GROUP BY wday;
-  } {
-    set Weekday [lindex $Weekdays $wday]
-    lappend Result $Weekday $cnt
-  }
-  return $Result
-}
-
-#
-#
-# \return list with hour and sum of commits on that day
-proc cvs::GetCommitsByHour { db } {
-  set Result [list]
-  $db eval {
-    SELECT hour, COUNT(hour) AS cnt
-      FROM (
-        SELECT strftime( '%H', date ) AS hour
-        FROM commits
-        ORDER BY hour
-      )
-      GROUP BY hour;
-  } {
-    lappend Result $hour $cnt
-  }
-  return $Result
-}
-
-#
-# import changes of CVS repository to SQLite db
-#
-# \param Repo           CVS Repository/module
-# \param commentfilter  function name to filter texts from a commit comment
-#
-proc cvs::rlog2sql { Repo commentfilter } {
-  variable Data
-
-  puts [info level 0]
-  set RlogFile [file join $Data(TEMP) ${Repo}.rlog]
-  set Ret [rlog $Repo $RlogFile]
-  if { $Ret < 0 } {
-    return $Ret
-  }
-
-  set fd [open $RlogFile]
-  set db cvsdb
-  set Filename [GetDbFile $Repo]
-  puts "Create SQLite3 db: '$Filename'"
-  sqlite3 cvsdb $Filename
-
-  InitDB $db
-
-  set LineNo 0
-  set History [dict create]
-  set CVSTags [list]
-  set RCSfile ""
-  set Base [lindex [split $Data(CVSROOT) ":"] end]
-  append Base "/" $Repo "/"
-  set BaseLen [string length $Base]
-  set Encoding [encoding system]
-
-  while {[gets $fd Line] >= 0} {
-    incr LineNo
-    switch -glob $Line {
-      "RCS file:*" {
-        set RCSfile [string range $Line 10+$BaseLen end-2]
-        dict set History file $RCSfile
-
-        #  puts "== $Line"
-        #  puts "   $RCSfile"
-
-      }
-      "head:*" -
-      "branch:*" -
-      "locks:*" -
-      "access list:*" {
-      }
-      "symbolic names:*" {
-        set CVSTags [list]
-        while {[gets $fd Line] >= 0} {
-          incr LineNo
-          lassign [split $Line ":"] Tag Version
-          lappend CVSTags [list [string trim $Tag] [string trim $Version]]
-          if { [string match "*keyword*" $Line] } {
-            break;
-          }
-        }
-        #puts $CVSTags
-        dict set History tags $CVSTags
-      }
-      "total rev*" {
-      }
-      "description:*" {
-        gets $fd Line
-        incr LineNo
-        set Checkin [dict create]
-        set Comment ""
-        set Cnt 1
-        
-        while {[gets $fd Line] >= 0} {
-          incr LineNo
-          switch -glob $Line {
-            "revision*" {
-              set Rev [lindex [split $Line] 1]
-              dict set Checkin revision $Rev
-
-              # CVS-Tag für die Revision suchen
-              dict set Checkin tag ""
-              foreach Item $CVSTags {
-                lassign $Item TagName TagRev
-                if { $Rev eq $TagRev } {
-                  dict set Checkin tag $TagName
-                }
-              }
-              #puts "Rev1 $Rev"
-              #puts "Rev2 [dict get $Checkin tag]"
-            }
-            "date:*" {
-              foreach Item [split $Line ";"] {
-                set key   [string trim [string range $Item 0 [string first ":" $Item]-1]]
-                set value [string trim [string range $Item [string first ":" $Item]+1 end]]
-                switch $key {
-                  "date" {
-                    set Date [clock scan $value -format {%Y/%m/%d %H:%M:%S}]
-                    set value [clock format $Date -format {%Y-%m-%d %H:%M:%S}]
-                  }
-                  "author" {
-                    if { [string index $value 0] eq "\\" } {
-                      set value [string range $value 1 end]
-                    }
-                    set value [string totitle $value]
-                  }
-                }
-                if { $key ne "" } {
-                  dict set Checkin [string trim $key] [string trim $value]
-                }
-              }
-              if { ![dict exists $Checkin lines] } {
-                try {
-                  set Size [file size $RCSfile]
-                  dict set Checkin lines "+$Size -0"
-                } on error {results options} {
-                  dict set Checkin lines "+10 -0"
-                }
-              }
-            }
-            "branches:*" {
-            }
-            "----------------------------" -
-            "============*" {
-              if { $commentfilter ne "" } {
-                try {
-                  set comment [{*}$commentfilter $Comment]
-                } on error {results options} {
-                  puts $results
-                  puts $options
-                  exit 1
-                }
-              }
-              dict set Checkin comment [encoding convertto utf-8 [string trim $comment " \r\n\t"]]
-              try {
-                  InsertCommit $db $RCSfile $Checkin
-                  InsertTag    $db $RCSfile $Checkin
-              } on error { result options } {
-                  puts [format {Line %5d, %s%s  %s} $LineNo $RCSfile "\n" $result]
-                  foreach k [dict keys $Checkin] {
-                      puts [format {%15s = %s} $k [dict get $Checkin $k]]
-                  }
-                  exit 1
-              }
-              set Comment ""
-              set Checkin [dict create]
-
-              if { [string match "===*" $Line] } {
-                set History [dict create]
-                break
-              }
-            }
-            "*" {
-              append Comment $Line "<br>"
-            }
-          }
-        }
-      }
-    }
-  }
-  close $fd
-
-  puts "Lines read: $LineNo"
-  return 0
-}
-
-proc cvs::ReadFile { Filename } {
+proc cvscl::ReadFile { Filename } {
   set fd [open $Filename]
   set Lines [read $fd]
   close $fd
   return $Lines
 }
 
-proc cvs::ChartCodeSize { Db } {
+proc cvscl::ChartCodeSize { Db } {
 
   set fd [open codesize.csv w+]
   set Size 0
@@ -469,8 +56,7 @@ proc cvs::ChartCodeSize { Db } {
   
 }
 
-proc cvs::RepoInfo { Db Repo Branch } {
-  variable Data
+proc cvscl::RepoInfo { Db Repo Branch } {
 
   set Html {
     <div class="w3-container w3-content">
@@ -484,7 +70,7 @@ proc cvs::RepoInfo { Db Repo Branch } {
   # TODO RLOGfile
   set Infos [list \
     "Erstellt am"   [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"] \
-    CVSROOT         $Data(CVSROOT) \
+    CVSROOT         $cvs::Data(CVSROOT) \
     Repository      $Repo \
     Branch          $Branch \
   ]
@@ -496,7 +82,7 @@ proc cvs::RepoInfo { Db Repo Branch } {
   return $Html
 }
 
-proc cvs::CodeSize { Db } {
+proc cvscl::CodeSize { Db } {
 
   set FNCodeSize [ChartCodeSize $Db]
 
@@ -513,7 +99,7 @@ proc cvs::CodeSize { Db } {
   }
 }
 
-proc cvs::ActivityByDev { Db } {
+proc cvscl::ActivityByDev { Db } {
   append Html {<div class="w3-container w3-content">
       <div class="w3-panel w3-x-blue-st">
         <p>Entwickler-Aktivität</p>
@@ -526,7 +112,7 @@ proc cvs::ActivityByDev { Db } {
         <col style="width:15%;padding-right: 16px">
         <col style="width:55%">
       </colgroup>
-      }
+  }
   append Html [format {
     <tr class="w3-dark-grey">
       <th>%s</th>
@@ -562,7 +148,7 @@ proc cvs::ActivityByDev { Db } {
   append Html {</table></div>}
 }
 
-proc cvs::CheckinByDeveloper { Db } {
+proc cvscl::CheckinByDeveloper { Db } {
 
   set fd [open commit_dev.csv w+]
   set Total 0
@@ -590,7 +176,7 @@ proc cvs::CheckinByDeveloper { Db } {
   }
 }
 
-proc cvs::CheckinList { fd Db } {
+proc cvscl::CheckinList { fd Db } {
 
   puts $fd {<div class="w3-container w3-content">
         <div class="w3-panel w3-x-blue-st">
@@ -614,7 +200,7 @@ proc cvs::CheckinList { fd Db } {
   }
 
   array set DateTagMap [list]
-  GetTagsByDate $Db DateTagMap
+  cvs::GetTagsByDate $Db DateTagMap
   #parray DateTagMap
 
   set LastCommit ""
@@ -704,9 +290,9 @@ proc cvs::CheckinList { fd Db } {
 
 }
 
-proc cvs::Tags { Db {MaxTags 20} } {
+proc cvscl::Tags { Db {MaxTags 20} } {
   array set DateTagMap [list]
-  GetTagsByDate $Db DateTagMap
+  cvs::GetTagsByDate $Db DateTagMap
   
   append Html {
       <div class="w3-container w3-content">
@@ -736,16 +322,16 @@ proc cvs::Tags { Db {MaxTags 20} } {
     </div>}
 }
 
-proc cvs::changelog { Repo Branch commentfilter } {
+proc cvscl::changelog { Repo Branch commentfilter } {
   variable Data
 
-  set Ret [rlog2sql $Repo $commentfilter]
+  set Ret [cvs::rlog2sql $Repo $commentfilter]
   if { $Ret < 0 } {
     return $Ret
   }
 
   set Db cvsdb
-  sqlite3 $Db [GetDbFile $Repo]
+  sqlite3 $Db [cvs::GetDbFile $Repo]
 
   set Css [ReadFile w3c.css]
   append Css {.w3-x-img-center{display:block;margin-left: auto; margin-right:auto}} "\n"
@@ -858,7 +444,7 @@ proc main { argv } {
     puts "ERROR file delete $results"
   }
 
-  cvs::changelog $Args(module) $Args(branch) commentfilter
+  cvscl::changelog $Args(module) $Args(branch) commentfilter
 }
 
 #puts $argv0
