@@ -607,6 +607,7 @@ proc main { argv } {
   set Args(module) ""
   set Args(branch) "HEAD"
   set Args(cvsroot) $::cvs::Data(CVSROOT)
+  set Args(output) "buildhtmlreport"
   set Args(ignore) ""
   set Args(commentfilter) ""
 
@@ -620,6 +621,19 @@ proc main { argv } {
       set Args(branch) [lindex [split $Argument "="] 1]
     } elseif { [string match "-d" $Argument] } {
       set Args(cvsroot) [lindex $argv $ArgIdx]
+    } elseif { [string match "-ouput=*" $Argument] } {
+
+      set Args(output) [lindex [split $Argument "="] 1]
+    } elseif { [string match "-dir=*" $Argument] } {
+
+      set Args(output) [lindex [split $Argument "="] 1]
+    } elseif { [string match "-ignore=*" $Argument] } {
+
+      set value [lindex [split $Argument "="] 1]
+      set Args(ignore) [split $value ","]
+    } elseif { [string match "-only=*" $Argument] } {
+
+      set Args(only) [lindex [split $Argument "="] 1]
     }
   }
   set cvs::Data(CVSROOT) $Args(cvsroot)
