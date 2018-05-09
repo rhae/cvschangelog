@@ -374,11 +374,11 @@ proc cvscl::CheckinList { fd Db } {
         <input class="w3-input w3-border w3-padding" type="text" placeholder="Search in checkins.." id="myInput" onkeyup="myFunction()">
         <br>
         <table class="w3-table-narrow-all w3-tiny" id="myTable">
-          <col style="width:8%">
+          <col style="width:9%">
           <col style="width:5%">
           <col style="width:12%">
           <col style="width:30%">
-          <col style="width:45%">
+          <col style="width:44%">
         <tr class="w3-dark-grey">
           <th>Datum</th>
           <th>Autor</th>
