@@ -321,7 +321,7 @@ proc cvscl::ActivityByDev { Db } {
     incr TotalCommits $ModifiedAll($Author)
   }
 
-  foreach Author [cvs::GetAuthors $Db] {
+  foreach { Author X } [lsort -stride 2 -index 1 -decreasing -integer [array get ModifiedAll]] {
     set Percentage [expr $ModifiedAll($Author).0 / $TotalCommits * 100]
     append Html [format {
       <tr>
