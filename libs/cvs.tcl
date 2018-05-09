@@ -57,6 +57,76 @@ proc cvs::rlog { Repo File } {
   return 0
 }
 
+
+proc cvs::checkout { Repo } {
+  variable Data
+
+  set Dir [file join $Data(TEMP) cvscl_$Repo]
+
+  file delete -force $Dir
+  set Status -1
+  set Start [clock seconds]
+  puts "Checkout $Repo"
+  try {
+    exec $Data(CVS) -d $Data(CVSROOT) checkout -d $Dir $Repo
+    set Status 0
+  } trap CHILDSTATUS {results options } {
+    puts "ERROR: $results"
+  } on error {results options } {
+    set Status 0
+  }
+  set Diff [expr [clock seconds] - $Start]
+  puts [format {  took %d s} $Diff ]
+
+  if { $Status < 0 } {
+    return ""
+  }
+
+  return $Dir
+}
+
+proc ::cvs::_update {Dir Rev} {
+  variable Data
+  set OldDir [pwd]
+  cd $Dir
+
+  foreach _Dir [glob -nocomplain -types d *] {
+    set Dir2 [file join $Dir $_Dir]
+    _update $Dir2 $Rev
+  }
+
+  set Files [glob -nocomplain -types f *]
+  if { $Files ne "" } {
+    try {
+      exec $Data(CVS) update -r $Rev {*}$Files
+      set Status 0
+    } trap CHILDSTATUS {results options } {
+      puts "CHILDSTATUS: $results"
+    } on error {results options } {
+      # puts "ERROR: $results"
+    }
+  } else {
+  }
+
+  cd $OldDir
+}
+
+proc cvs::update { Dir Rev } {
+  variable Data
+
+  set OldDir [pwd]
+
+  set Start [clock seconds]
+  puts "Update $Dir $Rev"
+
+  _update $Dir $Rev
+
+  set Diff [expr [clock seconds] - $Start]
+  puts [format {  took %d s} $Diff ]
+
+  cd $OldDir
+}
+
 #
 #  Get sqlite db filename
 #
@@ -355,7 +425,7 @@ proc cvs::rlog2sql { Repo commentfilter } {
       "RCS file:*" {
         set Idx [string first $Repo $Line]
         incr Idx $RepoLen
-        set RCSfile [string range $Line $Idx+3 end-2]
+        set RCSfile [string range $Line $Idx+1 end-2]
         dict set History file $RCSfile
 
         #puts "== $Line"

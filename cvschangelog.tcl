@@ -10,7 +10,18 @@ proc GetVersion {} {
 }
 
 namespace eval cvscl {
+    variable Extensions
 
+    array set Extensions [list \
+        C/CPP  {.h .hpp .c .cpp} \
+        FPGA   {.vhd .sym .sch .wcfg .xsvf .xise .mcs .ipf .ucf .cgc .cgp} \
+        Images {.jpg .png .gif .jpeg } \
+        Perl   {.pm .pl} \
+        Html   {.htm .html} \
+        Python {.py .pyc} \
+        Tcl/Tk {.tcl} \
+        Batch  {.cmd .cmd} \
+    ]
 }
 
 proc cvscl::ReadFile { Filename } {
@@ -20,10 +31,123 @@ proc cvscl::ReadFile { Filename } {
   return $Lines
 }
 
-proc cvscl::ChartCodeSize { Db } {
+proc IsTextFile { F } {
+    set BinExt {.png .jpeg .jpg .xls .xlsx .gif .exe .dll .lib .xsvf}
+    set Ext [string tolower [file extension $F]]
+    if { $Ext in $BinExt } {
+        return 0
+    }
+    return 1
+}
 
+proc _CollectFileStats { Dir LevelVar StatVar } {
+  upvar $LevelVar Level
+  upvar $StatVar Stat
+
+  set OldDir [pwd]
+  cd $Dir
+
+  incr Level
+  #puts "Level $Level"
+
+  set Cnt 0
+  set Dir2 ""
+  foreach _Dir [glob -nocomplain -types d *] {
+    set Dir2 [file join $Dir $_Dir]
+    set Cnt [_CollectFileStats  $Dir2 $LevelVar $StatVar]
+
+      if { $Level < 2 } {
+          #puts "xx Dir $Dir2"
+          dict lappend Stat SubDirs $Dir2
+          dict incr Stat $Dir2.Files $Cnt
+      }
+  }
+
+
+  set Files [glob -nocomplain -types f *]
+  if { $Files eq "" } {
+      cd $OldDir
+      incr Level -1
+      return $Cnt
+  }
+
+  set BufSize [expr 512 * 1024]
+  foreach File $Files {
+
+      set Ext [string tolower [file extension $File]]
+
+      if { ![dict exists $Stat Extensions] } {
+          dict lappend Stat Extensions $Ext
+      } else {
+          set Exts [dict get $Stat Extensions]
+          if { $Ext ni $Exts } {
+              dict lappend Stat Extensions $Ext
+          }
+      }
+      dict incr Stat Files$Ext
+      dict incr Stat Files-Total
+      incr Cnt
+
+      if { ![IsTextFile $File] } {
+          puts "Do not count lines for $File"
+          dict incr Stat BinFiles
+          continue
+      }
+
+      set fd [open $File]
+      fconfigure $fd -buffersize $BufSize -translation binary
+      set FCnt 0
+      while {![eof $fd]} {
+          set str [read $fd $BufSize]
+          set FCnt [expr { $FCnt + [string length $str]-[string length [string map {\n {}} $str]]}]
+      }
+      close $fd
+      # puts [format {File %s: %d lines} [file tail $File] $FCnt]
+      dict incr Stat SLOC$Ext $FCnt
+      dict incr Stat SLOC-total $FCnt
+
+      if { $Level < 2 } {
+          #puts "yy Dir $Dir2"
+          dict incr Stat $Dir2.Files
+      }
+  }
+
+  incr Level -1
+  cd $OldDir
+  return $Cnt
+}
+
+proc pdict {dict {pattern *}} {
+   set longest [tcl::mathfunc::max 0 {*}[lmap key [dict keys $dict $pattern] {string length $key}]]
+   dict for {key value} [dict filter $dict key $pattern] {
+      puts [format "%-${longest}s = %s" $key $value]
+   }
+}
+
+proc CollectFileStats { Dir StatVar } {
+    set Level 0
+    _CollectFileStats $Dir Level $StatVar
+}
+
+proc cvscl::DescrByFileExt { Ext } {
+    variable Extensions 
+
+    foreach {Descr Exts} [array get Extensions] {
+        if { $Ext in $Exts } {
+            return $Descr
+        }
+    }
+
+    return "Misc"
+}
+
+proc cvscl::ChartCodeSize { Db Repo InitialSize } {
+
+  set Filename [format {%s_codesize.png} $Repo]
   set fd [open codesize.csv w+]
-  set Size 0
+
+  set Size $InitialSize
+
   $Db eval {
     SELECT date, lines FROM commits ORDER BY strftime('%s', date) ASC;
   } {
@@ -35,7 +159,7 @@ proc cvscl::ChartCodeSize { Db } {
   close $fd
 
   gp set terminal pngcairo font \"Helvetica,10\" size 600,300 enhanced
-  gp set output "'codesize.png'"
+  gp set output "'$Filename'"
   gp set datafile separator "';'"
   gp set style line 101 lc rgb "'#808080'" lt 1 lw 1
   gp set border 3 front ls 101
@@ -45,7 +169,6 @@ proc cvscl::ChartCodeSize { Db } {
 
   gp set style data steps
   gp set timefmt "'%Y-%m-%d %H:%M:%S'"
-  gp set yrange \[ 0 : \]
   gp set xdata time
   gp unset key
 
@@ -54,6 +177,7 @@ proc cvscl::ChartCodeSize { Db } {
   gp plot "'codesize.csv' " using 1:2 ls 1
   gp exit
   
+  return $Filename
 }
 
 proc cvscl::RepoInfo { Db Repo Branch } {
@@ -82,21 +206,86 @@ proc cvscl::RepoInfo { Db Repo Branch } {
   return $Html
 }
 
-proc cvscl::CodeSize { Db } {
+proc cvscl::CodeSize { Db Repo } {
 
-  set FNCodeSize [ChartCodeSize $Db]
+  set Dir [cvs::checkout $Repo]
+  cvs::update $Dir 1.1
 
-  return {
+  set ::Stat [dict create]
+  CollectFileStats $Dir ::Stat
+  set InitialSize [dict get $::Stat SLOC-total]
+  set Size $InitialSize
+  puts "Initial line count of repo: $InitialSize"
+  # pdict $::Stat
+
+  set FilesTotal [dict get $::Stat Files-Total]
+  set MiscFiles 0
+  array set FileStat [list]
+  foreach Ext [dict get $::Stat Extensions] {
+    set Bucket   [DescrByFileExt $Ext]
+    set FilesExt [dict get $::Stat Files$Ext]
+    incr FileStat($Bucket) $FilesExt
+  }
+  parray FileStat
+
+  set FNCodeSize [ChartCodeSize $Db $Repo [dict get $::Stat Files-Total]]
+
+  set Html [format {
     <div class="w3-container w3-content">
       <div class="w3-panel w3-x-blue-st">
         <p>Codegr&ouml;&szlig;e</p>
       </div>
 
       <div class="w3-container">
-          <img src="codesize.png" class="w3-x-img-center">
+          <img src="%s" class="w3-x-img-center">
       </div>
-    </div>
+  } $FNCodeSize]
+
+
+  append Html {
+      <div class="w3-container">
+          <table class="w3-table-narrow-all w3-tiny">
+          <colgroup>
+            <col style="width:10%">
+            <col style="width:15%;padding-right: 16px">
+            <col style="width:15%;padding-right: 16px">
+            <col style="width:75%">
+          </colgroup>
+      }
+  append Html [format {
+    <tr class="w3-dark-grey">
+      <th>%s</th>
+      <th>%s</th>
+      <th>%s</th>
+      <th></th>
+    </tr>
+  } "Dateityp" "Anzahl absolut" "Anzahl prozentual"]
+
+  foreach {Bucket FileCnt} [lsort -stride 2 -index 1 -integer -decreasing [array get FileStat]] {
+      set Percent [expr {$FileCnt * 100.0 / $FilesTotal}]
+      puts "$Bucket  $Percent"
+      append Html [format {
+        <tr>
+            <td>%s</td>
+            <td class="w3-right-align">%s<span style="padding-right:32px"> </span></td>
+            <td class="w3-right-align">%.1f %%<span style="padding-right:32px"> </span></td>
+            <td></td>
+        </tr>
+      } $Bucket $FileCnt $Percent]
   }
+
+  append Html [format {
+        <tr>
+            <td>%s</td>
+            <td class="w3-right-align">%s<span style="padding-right:32px"> </span></td>
+            <td class="w3-right-align"><span style="padding-right:32px"> </span></td>
+            <td></td>
+        </tr>
+  } Gesamt $FilesTotal]
+
+  append Html </table> </div>
+
+  return $Html
 }
 
 proc cvscl::ActivityByDev { Db } {
@@ -364,7 +553,7 @@ proc cvscl::changelog { Repo Branch commentfilter } {
   puts $Html $Header
   puts $Html <body>
   puts $Html [RepoInfo $Db $Repo $Branch]
-  puts $Html [CodeSize $Db]
+  puts $Html [CodeSize $Db $Repo]
   puts $Html [ActivityByDev $Db]
   puts $Html [Tags $Db]
   #puts $Html [CheckinByDeveloper $Db]
