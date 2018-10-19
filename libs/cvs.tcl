@@ -57,11 +57,23 @@ proc cvs::rlog { Repo File } {
   return 0
 }
 
+proc cvs::get { Repo option } {
+  variable Data
+
+  switch $option {
+    -dir {
+      return [file join $Data(TEMP) cvscl_$Repo]
+    }
+    default {
+      error "unknown option $option."
+    }
+  }
+}
 
 proc cvs::checkout { Repo } {
   variable Data
 
-  set Dir [file join $Data(TEMP) cvscl_$Repo]
+  set Dir [get $Repo -dir]
 
   file delete -force $Dir
   set Status -1
@@ -85,44 +97,34 @@ proc cvs::checkout { Repo } {
   return $Dir
 }
 
-proc ::cvs::_update {Dir Rev} {
+proc ::cvs::update { Db Dir Rev} {
   variable Data
+
+  puts [info level 0]
   set OldDir [pwd]
+  file mkdir $Dir
   cd $Dir
 
-  foreach _Dir [glob -nocomplain -types d *] {
-    set Dir2 [file join $Dir $_Dir]
-    _update $Dir2 $Rev
-  }
+  set Cnt 10
+  set Files [list]
+  foreach F [GetFiles $Db] {
+    incr Cnt -1
+    lappend Files $F
 
-  set Files [glob -nocomplain -types f *]
-  if { $Files ne "" } {
-    try {
-      exec $Data(CVS) update -r $Rev {*}$Files
-      set Status 0
-    } trap CHILDSTATUS {results options } {
-      puts "CHILDSTATUS: $results"
-    } on error {results options } {
-      # puts "ERROR: $results"
+    if { $Cnt == 0 } {
+      try {
+        exec $Data(CVS) update -r $Rev {*}$Files
+        set Found 0
+        set Status 0
+      } trap CHILDSTATUS {results options } {
+        puts "CHILDSTATUS: $results"
+      } on error {results options } {
+        puts "ERROR: $results"
+      }
+      set Cnt 10
+      set Files [list]
     }
-  } else {
   }
-
-  cd $OldDir
-}
-
-proc cvs::update { Dir Rev } {
-  variable Data
-
-  set OldDir [pwd]
-
-  set Start [clock seconds]
-  puts "Update $Dir $Rev"
-
-  _update $Dir $Rev
-
-  set Diff [expr [clock seconds] - $Start]
-  puts [format {  took %d s} $Diff ]
 
   cd $OldDir
 }
@@ -156,6 +158,7 @@ proc cvs::InitDB { db } {
       revision text,
       branches text,
       lines text,
+      state text,
       comment text
     );
 
@@ -194,6 +197,7 @@ proc cvs::InsertCommit { db File Checkin } {
   set date [dict get $Checkin date]
   set revision [dict get $Checkin revision]
   set lines [dict get $Checkin lines]
+  set state [dict get $Checkin state]
   set comment [dict get $Checkin comment]
 
   $db eval {
@@ -204,6 +208,7 @@ proc cvs::InsertCommit { db File Checkin } {
       date,
       revision,
       lines,
+      state,
       comment
     ) VALUES (
       $File,
@@ -212,6 +217,7 @@ proc cvs::InsertCommit { db File Checkin } {
       $date,
       $revision,
       $lines,
+      $state,
       $comment
     );
   }
@@ -236,30 +242,48 @@ proc cvs::InsertTag { db File Checkin } {
 
   set commitid [dict get $Checkin commitid]
   set author [dict get $Checkin author]
-  set tag [dict get $Checkin tag]
+  set tags [dict get $Checkin tag]
   set date [dict get $Checkin date]
   set revision [dict get $Checkin revision]
 
-  if { $tag eq "" } {
+  if { $tags eq "" } {
     # puts "No Tag for: $File $revision $date"
     return;
   }
 
-  $db eval {
-    INSERT INTO tags(
-      commitid,
-      tag,
-      date,
-      file,
-      revision
-    ) VALUES (
-      $commitid,
-      $tag,
-      $date,
-      $File,
-      $revision
-    );
+  foreach tag $tags {
+    $db eval {
+      INSERT INTO tags(
+        commitid,
+        tag,
+        date,
+        file,
+        revision
+      ) VALUES (
+        $commitid,
+        $tag,
+        $date,
+        $File,
+        $revision
+      );
+    }
   }
+}
+
+#
+#
+#
+proc cvs::UpdateLineCnt { db File Version Cnt } {
+
+  set Lines "+$Cnt +0"
+
+  set Ret [$db eval {
+    UPDATE commits
+      SET lines = $Lines
+    WHERE
+      file == $File AND
+      revision == $Version;
+  }]
 }
 
 #
@@ -272,20 +296,25 @@ proc cvs::InsertTag { db File Checkin } {
 #
 proc cvs::GetTagsByDate { db MapVar } {
   upvar $MapVar Map
+  set TagList [list]
 
   $db eval {
-    SELECT date, tag 
-      FROM tags T 
-      WHERE date = (
-        SELECT MAX(date) 
-        FROM tags 
-        WHERE date = T.date AND tag = T.tag
-      )
-      GROUP BY tag
-      ORDER BY date ASC;
+    SELECT DISTINCT tag FROM tags;
   } {
-    set Map($date) $tag
+    lappend TagList $tag
   }
+
+  foreach Tag $TagList {
+    $db eval {
+      SELECT MAX(date) AS date, tag
+        FROM tags
+        WHERE tag == $Tag
+    } {
+      lappend Map($date) $tag
+    }
+  }
+
+  return
 }
 
 #
@@ -305,15 +334,28 @@ proc cvs::GetAuthors { db } {
 }
 
 #
+# returns all files in DB
+proc cvs::GetFiles { db } {
+  return [$db eval {
+    SELECT DISTINCT file FROM commits;
+  }]
+}
+
+#
 # \param db     handle to database
 # \param type   all or distinct file
 #
 # \return list with autor and number of modified files
-proc cvs::GetFileCntModified { db type } {
+proc cvs::GetFileCntModified { db type branch } {
+
+  set rev ""
+  if { $branch eq "HEAD" } {
+    set rev "1.%"
+  }
 
   if { $type eq "all" } {
     return [$db eval {
-      SELECT author, COUNT(*) FROM commits GROUP BY author;
+      SELECT author, COUNT(*) FROM commits WHERE revision like $rev GROUP BY author;
     }]
   }
 
@@ -321,7 +363,7 @@ proc cvs::GetFileCntModified { db type } {
   set Cnt 1
   set LastAuthor ""
   $db eval {
-      SELECT DISTINCT author, file FROM commits ORDER BY author;
+      SELECT DISTINCT author, file FROM commits WHERE revision like $rev ORDER BY author;
   } {
     if { $author eq $LastAuthor } {
       #set LastAuthor $author
@@ -388,16 +430,35 @@ proc cvs::GetCommitsByHour { db } {
   return $Result
 }
 
+proc cvs::GetChangesByUser { db author timeframe branch } {
+  set Result [list]
+
+  set rev ""
+  if { $branch eq "HEAD" } {
+    set rev "1._"
+  }
+
+  $db eval {
+    SELECT date, lines
+      FROM commits
+      WHERE author = $author AND revision like $rev
+        AND date BETWEEN date( 'now', $timeframe ) AND date( 'now' )
+  } {
+    lappend Result $date $lines
+  }
+}
+
 #
 # import changes of CVS repository to SQLite db
 #
 # \param Repo           CVS Repository/module
 # \param commentfilter  function name to filter texts from a commit comment
+# \param OnlyDirFile    list of directories oder files. Can contain wildcards
 #
-proc cvs::rlog2sql { Repo commentfilter } {
+proc cvs::rlog2sql { Repo commentfilter OnlyDirFile } {
   variable Data
 
-  puts [info level 0]
+  # puts [info level 0]
   set RlogFile [file join $Data(TEMP) ${Repo}.rlog]
   set Ret [rlog $Repo $RlogFile]
   if { $Ret < 0 } {
@@ -418,6 +479,7 @@ proc cvs::rlog2sql { Repo commentfilter } {
   set RCSfile ""
   set RepoLen [string length $Repo]
   set Encoding [encoding system]
+  set Start [clock seconds]
 
   while {[gets $fd Line] >= 0} {
     incr LineNo
@@ -465,12 +527,12 @@ proc cvs::rlog2sql { Repo commentfilter } {
               set Rev [lindex [split $Line] 1]
               dict set Checkin revision $Rev
 
-              # CVS-Tag für die Revision suchen
+              # CVS-Tags für die Revision suchen
               dict set Checkin tag ""
               foreach Item $CVSTags {
                 lassign $Item TagName TagRev
                 if { $Rev eq $TagRev } {
-                  dict set Checkin tag $TagName
+                  dict lappend Checkin tag $TagName
                 }
               }
               #puts "Rev1 $Rev"
@@ -497,18 +559,26 @@ proc cvs::rlog2sql { Repo commentfilter } {
                 }
               }
               if { ![dict exists $Checkin lines] } {
-                try {
-                  set Size [file size $RCSfile]
-                  dict set Checkin lines "+$Size -0"
-                } on error {results options} {
-                  dict set Checkin lines "+10 -0"
-                }
+                dict set Checkin lines "+0 -0"
               }
             }
             "branches:*" {
             }
             "----------------------------" -
             "============*" {
+              if { $OnlyDirFile ne "" } {
+                set InsertToDb 1
+                foreach O $OnlyDirFile {
+                  if { ![string match $O $RCSfile] } {
+                    set InsertToDb 0
+                  }
+                }
+                if { !$InsertToDb } {
+                  # puts "File $RCSfile does not match -only argument"
+                  break
+                }
+              }
+
               if { $commentfilter ne "" } {
                 try {
                   set comment [{*}$commentfilter $Comment]
@@ -518,6 +588,7 @@ proc cvs::rlog2sql { Repo commentfilter } {
                   exit 1
                 }
               }
+
               dict set Checkin comment [encoding convertto utf-8 [string trim $comment " \r\n\t"]]
               try {
                   InsertCommit $db $RCSfile $Checkin
@@ -548,5 +619,6 @@ proc cvs::rlog2sql { Repo commentfilter } {
   close $fd
 
   puts "Lines read: $LineNo"
+  puts [format {  took %d s} [expr [clock seconds] - $Start]]
   return 0
 }

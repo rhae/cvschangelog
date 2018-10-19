@@ -2,6 +2,7 @@
 
 package require platform
 
+source libs/log.tcl
 source libs/gp.tcl
 source libs/cvs.tcl
 
@@ -11,6 +12,7 @@ proc GetVersion {} {
 
 namespace eval cvscl {
     variable Extensions
+    variable Args
 
     array set Extensions [list \
         C/CPP  {.h .hpp .c .cpp} \
@@ -31,6 +33,18 @@ proc cvscl::ReadFile { Filename } {
   return $Lines
 }
 
+#
+#  Übernimmt die Programmargumente aus dem Array A
+#
+proc cvscl::SetArgs { ArgsVar } {
+    upvar $ArgsVar A
+    variable Args
+
+    foreach {key val} [array get A] {
+        set Args($key) $val
+    }
+}
+
 proc IsTextFile { F } {
     set BinExt {.png .jpeg .jpg .xls .xlsx .gif .exe .dll .lib .xsvf}
     set Ext [string tolower [file extension $F]]
@@ -40,40 +54,13 @@ proc IsTextFile { F } {
     return 1
 }
 
-proc _CollectFileStats { Dir LevelVar StatVar } {
-  upvar $LevelVar Level
+proc CollectFileStats { Db Dir StatVar AllVersions } {
   upvar $StatVar Stat
 
-  set OldDir [pwd]
-  cd $Dir
-
-  incr Level
-  #puts "Level $Level"
-
-  set Cnt 0
-  set Dir2 ""
-  foreach _Dir [glob -nocomplain -types d *] {
-    set Dir2 [file join $Dir $_Dir]
-    set Cnt [_CollectFileStats  $Dir2 $LevelVar $StatVar]
-
-      if { $Level < 2 } {
-          #puts "xx Dir $Dir2"
-          dict lappend Stat SubDirs $Dir2
-          dict incr Stat $Dir2.Files $Cnt
-      }
-  }
-
-
-  set Files [glob -nocomplain -types f *]
-  if { $Files eq "" } {
-      cd $OldDir
-      incr Level -1
-      return $Cnt
-  }
-
   set BufSize [expr 512 * 1024]
-  foreach File $Files {
+  foreach F [cvs::GetFiles $Db $AllVersions] {
 
+      set File [file join $Dir $F]
       set Ext [string tolower [file extension $File]]
 
       if { ![dict exists $Stat Extensions] } {
@@ -94,26 +81,25 @@ proc _CollectFileStats { Dir LevelVar StatVar } {
           continue
       }
 
-      set fd [open $File]
-      fconfigure $fd -buffersize $BufSize -translation binary
-      set FCnt 0
-      while {![eof $fd]} {
-          set str [read $fd $BufSize]
-          set FCnt [expr { $FCnt + [string length $str]-[string length [string map {\n {}} $str]]}]
-      }
-      close $fd
-      # puts [format {File %s: %d lines} [file tail $File] $FCnt]
-      dict incr Stat SLOC$Ext $FCnt
-      dict incr Stat SLOC-total $FCnt
+      try {
+          set fd [open $File]
+          fconfigure $fd -buffersize $BufSize -translation binary
+          set FCnt 0
+          while {![eof $fd]} {
+              set str [read $fd $BufSize]
+              set FCnt [expr { $FCnt + [string length $str]-[string length [string map {\n {}} $str]]}]
+          }
+          close $fd
+          # puts [format {File %s: %d lines} [file tail $File] $FCnt]
+          dict incr Stat SLOC$Ext $FCnt
+          dict incr Stat SLOC-total $FCnt
 
-      if { $Level < 2 } {
-          #puts "yy Dir $Dir2"
-          dict incr Stat $Dir2.Files
+          dict set Stat [file join $Dir $File] $FCnt
+          dict lappend Stat _Files [file join $Dir $File]
+      } on error {results options} {
       }
   }
 
-  incr Level -1
-  cd $OldDir
   return $Cnt
 }
 
@@ -122,11 +108,6 @@ proc pdict {dict {pattern *}} {
    dict for {key value} [dict filter $dict key $pattern] {
       puts [format "%-${longest}s = %s" $key $value]
    }
-}
-
-proc CollectFileStats { Dir StatVar } {
-    set Level 0
-    _CollectFileStats $Dir Level $StatVar
 }
 
 proc cvscl::DescrByFileExt { Ext } {
@@ -143,7 +124,7 @@ proc cvscl::DescrByFileExt { Ext } {
 
 proc cvscl::ChartCodeSize { Db Repo InitialSize } {
 
-  set Filename [format {%s_codesize.png} $Repo]
+  set Filename [GetFilename $Repo "_codesize.png"]
   set fd [open codesize.csv w+]
 
   set Size $InitialSize
@@ -206,17 +187,36 @@ proc cvscl::RepoInfo { Db Repo Branch } {
   return $Html
 }
 
-proc cvscl::CodeSize { Db Repo } {
+proc pdict {dict {pattern *}} {
+   set longest 0
+   dict for {key -} $dict {
+      if {[string match $pattern $key]} {
+         set longest [expr {max($longest, [string length $key])}]
+      }
+   }
+   dict for {key value} [dict filter $dict key $pattern] {
+      puts [format "%-${longest}s = %s" $key $value]
+   }
+}
 
-  set Dir [cvs::checkout $Repo]
-  cvs::update $Dir 1.1
+proc cvscl::Overview { Db Repo Branch } {
+  set Dir [cvs::get $Repo -dir]
+  cvs::checkout $Repo
+  cvs::update $Db $Dir 1.1
 
   set ::Stat [dict create]
-  CollectFileStats $Dir ::Stat
+  CollectFileStats $Db $Dir ::Stat 0
+  #pdict $::Stat
   set InitialSize [dict get $::Stat SLOC-total]
   set Size $InitialSize
   puts "Initial line count of repo: $InitialSize"
-  # pdict $::Stat
+  
+  set DirLen [string length $Dir]
+  foreach F [dict get $::Stat _Files] {
+    set Cnt [dict get $::Stat $F]
+    set File [string range $F $DirLen+1 end]
+    cvs::UpdateLineCnt $Db $File 1.1 $Cnt
+  }
 
   set FilesTotal [dict get $::Stat Files-Total]
   set MiscFiles 0
@@ -226,32 +226,21 @@ proc cvscl::CodeSize { Db Repo } {
     set FilesExt [dict get $::Stat Files$Ext]
     incr FileStat($Bucket) $FilesExt
   }
-  parray FileStat
-
-  set FNCodeSize [ChartCodeSize $Db $Repo [dict get $::Stat Files-Total]]
-
-  set Html [format {
-    <div class="w3-container w3-content">
-      <div class="w3-panel w3-x-blue-st">
-        <p>Codegr&ouml;&szlig;e</p>
-      </div>
-
-      <div class="w3-container">
-          <img src="%s" class="w3-x-img-center">
-      </div>
-  } $FNCodeSize]
-
 
   append Html {
-      <div class="w3-container">
-          <table class="w3-table-narrow-all w3-tiny">
-          <colgroup>
-            <col style="width:10%">
-            <col style="width:15%;padding-right: 16px">
-            <col style="width:15%;padding-right: 16px">
-            <col style="width:75%">
-          </colgroup>
-      }
+    <div class="w3-container w3-content">
+      <div class="w3-panel w3-x-blue-st">
+        <p>&Uuml;bersicht</p>
+      </div>    
+
+      <table class="w3-table-narrow-all w3-tiny">
+      <colgroup>
+        <col style="width:10%">
+        <col style="width:15%;padding-right: 16px">
+        <col style="width:15%;padding-right: 16px">
+        <col style="width:75%">
+      </colgroup>
+  }
   append Html [format {
     <tr class="w3-dark-grey">
       <th>%s</th>
@@ -284,6 +273,26 @@ proc cvscl::CodeSize { Db Repo } {
   } Gesamt $FilesTotal]
 
   append Html </table> </div>
+}
+
+proc cvscl::CodeSize { Db Repo } {
+
+  set ::Stat [dict create]
+  CollectFileStats $Db [cvs::get $Repo -dir] ::Stat 1
+  set FilesTotal [dict get $::Stat Files-Total]
+  set FNCodeSize [ChartCodeSize $Db $Repo [dict get $::Stat Files-Total]]
+
+  set Html [format {
+    <div class="w3-container w3-content">
+      <div class="w3-panel w3-x-blue-st">
+        <p>Codegr&ouml;&szlig;e</p>
+      </div>
+
+      <div class="w3-container">
+          <img src="%s" class="w3-x-img-center">
+      </div>
+    </div>
+  } $FNCodeSize]
 
   return $Html
 }
@@ -312,8 +321,8 @@ proc cvscl::ActivityByDev { Db } {
     </tr>
   } "Entwickler" "Änderungen absolut (alle)" "Änderungen prozentual (alle)" "Änderungen (unterschiedliche Dateien)" "Letzte Änderung"]
 
-  array set ModifiedAll [cvs::GetFileCntModified $Db "all"]
-  array set ModifiedDistinct [cvs::GetFileCntModified $Db "distinct"]
+  array set ModifiedAll [cvs::GetFileCntModified $Db "all" HEAD]
+  array set ModifiedDistinct [cvs::GetFileCntModified $Db "distinct" HEAD]
   array set LastCommit [cvs::GetLastCommit $Db]
 
   set TotalCommits 0
@@ -365,7 +374,27 @@ proc cvscl::CheckinByDeveloper { Db } {
   }
 }
 
-proc cvscl::CheckinList { fd Db } {
+proc cvscl::IsOnBranch { Revision Branch } {
+
+  if { $Branch eq "HEAD" } {
+    set _MaxSplits 2
+    set _Rev ""
+  } else {
+    error "only HEAD is supported"
+  }
+
+  if { [llength [split $Revision "."]] == $_MaxSplits } {
+    return true
+  }
+
+  if { $_Rev != "" && [string match ${_Rev}* $Revision] } {
+      return true
+  }
+
+  return false
+}
+
+proc cvscl::CheckinList { fd Db MaxCommits {Branch HEAD}} {
 
   puts $fd {<div class="w3-container w3-content">
         <div class="w3-panel w3-x-blue-st">
@@ -397,18 +426,32 @@ proc cvscl::CheckinList { fd Db } {
   set CheckIn ""
   set LastComment ""
   set LastDate ""
-  set MaxCommits 100
   set CommitCnt 0
   $Db eval {
     SELECT * FROM commits ORDER BY date DESC;
   } {
+
+    if { ![IsOnBranch $revision $Branch] } {
+      continue
+    }
+
     set FullDate $date
     set date [lindex [split $date] 0]
 
     if { $LastCommit eq "" } {
       set Tag ""
       if { $FullDate in [array names DateTagMap] } {
-        set Tag [format {<div class="w3-x-tag w3-black">%s</div>} $DateTagMap($FullDate)]
+
+        set Tags $DateTagMap($FullDate)
+        set Cnt [llength $Tags]
+
+        for {set i 0 } { $i < $Cnt } { incr i } {
+          set T [lindex $Tags $i]
+          append Tag [format {<div class="w3-x-tag w3-black">%s</div>} $T]
+          if { $i+1 < $Cnt } {
+            append Tag {<br />}
+          }
+        }
       }
 
       set CheckIn [format {<tr>
@@ -446,7 +489,16 @@ proc cvscl::CheckinList { fd Db } {
 
       set Tag ""
       if { $FullDate in [array names DateTagMap] } {
-        set Tag [format {<div class="w3-x-tag w3-black">%s</div>} $DateTagMap($FullDate)]
+        set Tags $DateTagMap($FullDate)
+        set Cnt [llength $Tags]
+
+        for {set i 0 } { $i < $Cnt } { incr i } {
+          set T [lindex $Tags $i]
+          append Tag [format {<div class="w3-x-tag w3-black">%s</div>} $T]
+          if { $i+1 < $Cnt } {
+            append Tag {<br />}
+          }
+        }
       }
       set CheckIn [format {        <tr>
           <td>%s</td>
@@ -499,22 +551,36 @@ proc cvscl::Tags { Db {MaxTags 20} } {
   }
   
   set TagCnt 0
-  foreach {FullDate Tag} [lsort -stride 2 -index 0 -decreasing [array get DateTagMap]] {
+  foreach {FullDate Tags} [lsort -stride 2 -index 0 -decreasing [array get DateTagMap]] {
     incr TagCnt
     if { $TagCnt > $MaxTags } {
       break;
     }
     lassign [split $FullDate " "] Date
-    append Html [format {<tr><td>%s</td><td>%s</td></tr>} $Tag $Date] "\n"
+
+    append Html [format {<tr><td>%s</td><td>%s</td></tr>} [join $Tags {<br />}] $Date] "\n"
   }
   append Html {</table>
     </div>}
 }
 
-proc cvscl::changelog { Repo Branch commentfilter } {
+proc cvscl::GetFilename { Repo Ext } {
+  variable Args
+
+  set Postfix ""
+  if { $Args(only) ne "" } {
+    set Postfix "_"
+    append Postfix [string map {{*} {} : {} {\\} _ / _} $Args(only)]
+  }
+
+  append FN $Repo $Postfix $Ext
+  return $FN
+}
+
+proc cvscl::changelog { Repo Branch commentfilter OnlyDirFile } {
   variable Data
 
-  set Ret [cvs::rlog2sql $Repo $commentfilter]
+  set Ret [cvs::rlog2sql $Repo $commentfilter $OnlyDirFile]
   if { $Ret < 0 } {
     return $Ret
   }
@@ -547,18 +613,24 @@ proc cvscl::changelog { Repo Branch commentfilter } {
 </style>
 } $Repo $Css]
 
-  set Filename ${Repo}.html
+  set Filename [GetFilename $Repo ".html"]
   set Html [open $Filename "w+"]
 
   puts $Html $Header
   puts $Html <body>
   puts $Html [RepoInfo $Db $Repo $Branch]
+  puts $Html [Overview $Db $Repo $Branch]
   puts $Html [CodeSize $Db $Repo]
   puts $Html [ActivityByDev $Db]
   puts $Html [Tags $Db]
   #puts $Html [CheckinByDeveloper $Db]
-  CheckinList $Html $Db
-  puts $Html {<div class="w3-container w3-content"><br></div>}
+  CheckinList $Html $Db 250
+  puts $Html [format {<div class="w3-container w3-content">
+    <div class="w3-panel w3-border-top">
+      <div class="w3-small w3-center">cvschangelog.tcl - %s</div>
+    </div>
+  </div>} [GetVersion]]
+
   puts $Html {
     <script>
     function myFunction() {
@@ -598,7 +670,13 @@ proc commentfilter { Comment } {
   return $Comment
 }
 
-
+#
+#  Hauptprogramm
+#
+#  Liest das CSV-Repository ein und erzeugt das CVS-Changelog als HTML-Datei.
+#  Die CVS-Versionsangaben werden aus der RLOG-Datei gelesen und in eine sqlite
+#  DB gespeichert.
+#
 proc main { argv } {
 
   set ArgIdx 0
@@ -609,7 +687,11 @@ proc main { argv } {
   set Args(cvsroot) $::cvs::Data(CVSROOT)
   set Args(output) "buildhtmlreport"
   set Args(ignore) ""
+  set Args(rlogfile) ""
   set Args(commentfilter) ""
+  set Args(only) ""
+
+  puts [format {cvschangelog.tcl - %s} [GetVersion]]
 
   while { $ArgIdx < $ArgMax } {
     
@@ -631,12 +713,27 @@ proc main { argv } {
 
       set value [lindex [split $Argument "="] 1]
       set Args(ignore) [split $value ","]
+    } elseif { [string match "-rlogfile=*" $Argument] } {
+
+      set value [lindex [split $Argument "="] 1]
+      set Args(rlogfile) [split $value ","]
     } elseif { [string match "-only=*" $Argument] } {
 
       set Args(only) [lindex [split $Argument "="] 1]
     }
   }
+
+  if { $Args(module) eq "" } {
+    puts stderr "No module specified. Use -m=<Modulename>"
+    exit 1
+  }
   set cvs::Data(CVSROOT) $Args(cvsroot)
+  cvscl::SetArgs Args
+
+  if { $Args(output) ne "buildhtmlreport" } {
+    puts stderr "Invalid output format. Valid formats are: buildhtmlreport"
+    exit 1
+  }
 
   #parray Args
   #parray cvs::Data
@@ -647,10 +744,7 @@ proc main { argv } {
     puts "ERROR file delete $results"
   }
 
-  cvscl::changelog $Args(module) $Args(branch) commentfilter
+  cvscl::changelog $Args(module) $Args(branch) commentfilter $Args(only)
 }
-
-#puts $argv0
-#puts $argv
 
 main $argv
